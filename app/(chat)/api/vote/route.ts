@@ -1,75 +1,51 @@
-import { auth } from "@/app/(auth)/auth";
-import { getChatById, getVotesByChatId, voteMessage } from "@/lib/db/queries";
-import { ChatSDKError } from "@/lib/errors";
+import { CoreMessage, streamText } from 'ai';
+import { openai } from '@ai-sdk/openai';
+import { searchVectorStore } from '@/lib/vector-store';
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const chatId = searchParams.get("chatId");
+// IMPORTANT: Use this to ensure the model only runs on the server
+export const runtime = 'edge';
 
-  if (!chatId) {
-    return new ChatSDKError(
-      "bad_request:api",
-      "Parameter chatId is required."
-    ).toResponse();
+export async function POST(req: Request) {
+  const { messages }: { messages: CoreMessage[] } = await req.json();
+
+  // Get the last user message
+  const lastUserMessage = messages[messages.length - 1]?.content;
+
+  if (typeof lastUserMessage !== 'string') {
+    return new Response('Invalid message format', { status: 400 });
   }
 
-  const session = await auth();
+  // --- This is the RAG part ---
+  // 1. Search your database for relevant context
+  const context = await searchVectorStore(lastUserMessage);
+  // -----------------------------
 
-  if (!session?.user) {
-    return new ChatSDKError("unauthorized:vote").toResponse();
-  }
+  // 2. Create a system prompt with the context
+  const systemPrompt = `
+    You are a helpful assistant for the Nairobi Securities Exchange (NSE).
+    Your name is "Market Bot". You are friendly and professional.
 
-  const chat = await getChatById({ id: chatId });
+    Answer the user's question based ONLY on the following information.
+    If the information is not in the context, say "I'm sorry, I don't have that information on the NSE website."
+    Do not make up answers. Do not provide financial advice.
 
-  if (!chat) {
-    return new ChatSDKError("not_found:chat").toResponse();
-  }
+    --- CONTEXT ---
+    ${context}
+    --- END CONTEXT ---
+  `;
 
-  if (chat.userId !== session.user.id) {
-    return new ChatSDKError("forbidden:vote").toResponse();
-  }
+  // 3. Add the system prompt to the message list
+  const messagesWithContext: CoreMessage[] = [
+    { role: 'system', content: systemPrompt },
+    ...messages, // Add all previous messages
+  ];
 
-  const votes = await getVotesByChatId({ id: chatId });
-
-  return Response.json(votes, { status: 200 });
-}
-
-export async function PATCH(request: Request) {
-  const {
-    chatId,
-    messageId,
-    type,
-  }: { chatId: string; messageId: string; type: "up" | "down" } =
-    await request.json();
-
-  if (!chatId || !messageId || !type) {
-    return new ChatSDKError(
-      "bad_request:api",
-      "Parameters chatId, messageId, and type are required."
-    ).toResponse();
-  }
-
-  const session = await auth();
-
-  if (!session?.user) {
-    return new ChatSDKError("unauthorized:vote").toResponse();
-  }
-
-  const chat = await getChatById({ id: chatId });
-
-  if (!chat) {
-    return new ChatSDKError("not_found:vote").toResponse();
-  }
-
-  if (chat.userId !== session.user.id) {
-    return new ChatSDKError("forbidden:vote").toResponse();
-  }
-
-  await voteMessage({
-    chatId,
-    messageId,
-    type,
+  // 4. Send the new prompt to the AI and stream the response
+  // We are using OpenAI directly, not Vercel's Gateway
+  const result = await streamText({
+    model: openai('gpt-4o'), // Or 'gpt-3.5-turbo' if gpt-4o gives quota errors
+    messages: messagesWithContext,
   });
 
-  return new Response("Message voted", { status: 200 });
+  return result.toAIStreamResponse();
 }

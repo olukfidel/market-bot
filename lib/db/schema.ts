@@ -10,6 +10,8 @@ import {
   timestamp,
   uuid,
   varchar,
+  serial,
+  vector
 } from "drizzle-orm/pg-core";
 import type { AppUsage } from "../usage";
 
@@ -171,3 +173,14 @@ export const stream = pgTable(
 );
 
 export type Stream = InferSelectModel<typeof stream>;
+// --- ADD THIS TO THE BOTTOM OF lib/db/schema.ts ---
+
+
+export const nseKnowledge = pgTable('nse_knowledge', {
+  id: serial('id').primaryKey(),
+  content: text('content').notNull(),
+  // The '1536' is the dimension of the embedding.
+  // This is the standard for OpenAI's 'text-embedding-ada-002' model.
+  embedding: vector('embedding', { dimensions: 384 }).notNull(),
+});
+// --- END OF CODE TO ADD ---
